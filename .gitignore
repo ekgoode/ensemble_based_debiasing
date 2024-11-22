@@ -129,7 +129,12 @@ venv/
 ENV/
 env.bak/
 venv.bak/
-
+*.json
+*.txt
+*.pt
+*.pth
+*.safetensors
+*.bin
 # Spyder project settings
 .spyderproject
 .spyproject
