@@ -20,10 +20,9 @@ class BoWModel(nn.Module):
         self.fc = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, x):
-        # Compute mean embedding (BoW representation)
-        embedded = self.embedding(x)  # Shape: (batch_size, seq_len, hidden_dim)
-        bow_rep = embedded.mean(dim=1)  # Shape: (batch_size, hidden_dim)
-        logits = self.fc(bow_rep)  # Shape: (batch_size, num_classes)
+        embedded = self.embedding(x)
+        bow_rep = embedded.mean(dim=1)
+        logits = self.fc(bow_rep)
         return logits
 
 
@@ -45,9 +44,7 @@ class MixedCapacityEnsemble(nn.Module):
         self.num_classes = num_classes
         self.loss_weight = loss_weight
         
-        # Class prior (log(p_y))
         if class_prior is None:
-            # Initialize uniform prior if none is provided
             self.class_prior = nn.Parameter(torch.zeros(num_classes), requires_grad=False)
         else:
             self.class_prior = nn.Parameter(torch.log(torch.tensor(class_prior)), requires_grad=False)
@@ -56,15 +53,12 @@ class MixedCapacityEnsemble(nn.Module):
         # Forward pass through high-capacity model
         high_output = self.high_capacity_model(**high_input)
         high_logits = high_output.logits  # Access logits
-        print("High Logits Shape:", high_logits.shape)
         
         # Forward pass through low-capacity model
         low_logits = self.low_capacity_model(low_input)
-        print("Low Logits Shape:", low_logits.shape)
         
         # Compute ensemble logits
         ensemble_logits = high_logits + low_logits + self.class_prior
-        print("Ensemble Logits Shape:", ensemble_logits.shape)
 
         if labels is not None:
             # Compute losses
@@ -255,7 +249,7 @@ def train():
     max_seq_len = 128
     vocab_size = 10000
     num_classes = 3
-    learning_rate = 5e-5
+    learning_rate = 3e-5
     num_epochs = 3
     weight_low_loss = 0.5
 
@@ -272,9 +266,9 @@ def train():
     ).to(device)
 
     bow_model = nn.Sequential(
-        nn.Linear(vocab_size * 2, 128),  # BoW input size is vocab_size * 2 (premise + hypothesis)
+        nn.Linear(vocab_size * 2, 300),  # BoW input size is vocab_size * 2 (premise + hypothesis)
         nn.ReLU(),
-        nn.Linear(128, num_classes)
+        nn.Linear(300, num_classes)
     ).to(device)
 
     # Mixed Capacity Ensemble
