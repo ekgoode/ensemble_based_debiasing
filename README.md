@@ -36,6 +36,7 @@ The project demonstrates how to:
 project_root/
 │
 ├── data/                   # Dataset files
+├── scrap/                  # Deprecated code. Mainly for archival purposes. 
 ├── src/                    # Source code
 │   ├── generate_artifact_statistics.py  # Generate artifact stats (e.g., Figure 1)
 │   ├── train_electra.py                  # Train ELECTRA-small model
@@ -44,7 +45,7 @@ project_root/
 │   └── evaluate_mce.py                   # Evaluate MCE model (e.g. Table 3, 4, 5)
 ├── models/                 # Trained model checkpoints (ELECTRA-small, MCE)
 ├── run.py                  # End-to-end script to run results
-├── requirements.txt        
+├── requirements.txt        # Dependencies
 └──  README.md               # Project overview (this file)
 ```
 
@@ -60,6 +61,8 @@ The following dependencies are required to run the code:
 - scikit-learn
 - tqdm
 - matplotlib
+- numpy
+- pandas
 
 Install the required dependencies using:
 
@@ -83,8 +86,8 @@ This project consists of three main steps:
      - **Mixed Capacity Ensemble (MCE)**: Combines a high-capacity transformer model with a low-capacity Bag-of-Words model.
 
 3. **Model Evaluation**:
-   - Evaluate trained models on SNLI test data and challenging datasets like HANS.
-   - Output: Performance metrics (accuracy, F1 score, etc.) and a comparison of models.
+   - Evaluate trained models on SNLI test data and HANS.
+   - Output: Results included in tables 1-5.
 
 ---
 
@@ -100,19 +103,23 @@ This saves **Figure 1** as `artifact_statistics_snli.png` in the current directo
 
 ### Step 2: Train Models
 ```bash
-python src/train_models.py
+python src/train_electra.py
+python src/train_mce.py
+
 ```
 This trains and saves the **ELECTRA-small** and **MCE** models in the `models/` directory.
 
 ### Step 3: Evaluate Models
 ```bash
-python src/evaluate_models.py
+python src/evaluate_electra.py
+python src/train_mce.py
+
 ```
 This evaluates the trained models and prints accuracy and other metrics.
 
 ### Full Pipeline
 Run the entire pipeline end-to-end:
 ```bash
-python reproduce_results.py
+python run.py
 ```
 
