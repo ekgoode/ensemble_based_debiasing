@@ -8,11 +8,8 @@ This repository contains the implementation of a Mixed Capacity Ensemble (MCE) f
 - [Introduction](#introduction)
 - [Project Structure](#project-structure)
 - [Dependencies](#dependencies)
-- [Setup](#setup)
 - [Pipeline Overview](#pipeline-overview)
 - [Reproducing Results](#reproducing-results)
-- [Key Results](#key-results)
-- [Acknowledgments](#acknowledgments)
 
 ---
 
@@ -46,7 +43,8 @@ project_root/
 ├── models/                 # Trained model checkpoints (ELECTRA-small, MCE)
 ├── run.py                  # End-to-end script to run results
 ├── requirements.txt        # Dependencies
-└──  README.md               # Project overview (this file)
+├── CompetentModels.pdf     # The final report on this project
+└──  README.md              # Project overview (this file)
 ```
 
 ---
