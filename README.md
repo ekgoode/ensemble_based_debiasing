@@ -36,19 +36,17 @@ The project demonstrates how to:
 project_root/
 │
 ├── data/                   # Dataset files (processed and raw)
-├── notebooks/              # Jupyter notebooks for exploratory analysis
 ├── src/                    # Source code
 │   ├── generate_artifact_statistics.py  # Generate artifact stats (e.g., Figure 1)
 │   ├── train_electra.py                  # Train ELECTRA-small model
 │   ├── train_mce.py                      # Train Mixed Capacity Ensemble
-│   ├── evaluate_models.py                # Evaluate models and compute metrics
+│   ├── evaluate.py                # Evaluate models and compute metrics
+│   ├── train.py                   # Train all models
 │   └── utils.py                          # Shared utilities
 ├── models/                 # Trained model checkpoints (ELECTRA-small, MCE)
-├── tests/                  # Unit and integration tests
-├── reproduce_results.py    # End-to-end script for reproducing results
+├── run.py    # End-to-end script for reproducing results
 ├── requirements.txt        # Dependencies
 ├── README.md               # Project overview (this file)
-└── setup.py                # Installation script
 ```
 
 ---
