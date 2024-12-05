@@ -35,18 +35,17 @@ The project demonstrates how to:
 ```
 project_root/
 │
-├── data/                   # Dataset files (processed and raw)
+├── data/                   # Dataset files
 ├── src/                    # Source code
 │   ├── generate_artifact_statistics.py  # Generate artifact stats (e.g., Figure 1)
 │   ├── train_electra.py                  # Train ELECTRA-small model
 │   ├── train_mce.py                      # Train Mixed Capacity Ensemble
-│   ├── evaluate.py                # Evaluate models and compute metrics
-│   ├── train.py                   # Train all models
-│   └── utils.py                          # Shared utilities
+│   ├── evaluate_electra.py               # Evaluate ELECTRA-small model (e.g. Table 1, 2, 3)
+│   └── evaluate_mce.py                   # Evaluate MCE model (e.g. Table 3, 4, 5)
 ├── models/                 # Trained model checkpoints (ELECTRA-small, MCE)
-├── run.py    # End-to-end script for reproducing results
-├── requirements.txt        # Dependencies
-├── README.md               # Project overview (this file)
+├── run.py                  # End-to-end script to run results
+├── requirements.txt        
+└──  README.md               # Project overview (this file)
 ```
 
 ---
@@ -67,26 +66,6 @@ Install the required dependencies using:
 ```bash
 pip install -r requirements.txt
 ```
-
----
-
-## **Setup**
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/your-username/dataset-artifact-analysis.git
-   cd dataset-artifact-analysis
-   ```
-
-2. Install the project:
-   ```bash
-   pip install .
-   ```
-
-3. Verify installation:
-   ```bash
-   pytest tests/
-   ```
 
 ---
 
