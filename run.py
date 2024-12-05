@@ -1,19 +1,33 @@
-import os
-from src.generate_artifact_statistics import generate_artifact_statistics
-from src.train_models import train_all_models
-from src.evaluate_models import evaluate_all_models
-from datasets import load_dataset
+import subprocess
 
-def reproduce_results():
-    print("Step 1: Generating artifact statistics...")
-    dataset = load_dataset("snli")["train"]
-    generate_artifact_statistics(dataset)
+# Scripts run in order included below
+scripts = [
+    "src/generate_artifact_statistics.py",
+    "src/train_electra.py",
+    "src/train_mce.py",
+    "src/evaluate_electra.py",
+    "src/evaluate_mce.py",
+]
 
-    print("Step 2: Training models...")
-    train_all_models()
+def run_script(script_path):
+    """
+    Run a Python script and print its output in real-time.
+    """
+    print(f"Running {script_path}...")
+    try:
+        result = subprocess.run(["python", script_path], check=True, text=True, capture_output=True)
+        print(result.stdout)
+        print(f"Finished {script_path}\n{'='*50}\n")
+    except subprocess.CalledProcessError as e:
+        print(f"Error while running {script_path}:\n{e.stderr}")
+        exit(1)
 
-    print("Step 3: Evaluating models...")
-    evaluate_all_models()
+def main():
+    """
+    Run all scripts in the specified order.
+    """
+    for script in scripts:
+        run_script(script)
 
 if __name__ == "__main__":
-    reproduce_results()
+    main()
