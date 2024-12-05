@@ -1,240 +1,170 @@
 import os
-save_dir = "./saved_models"
-os.makedirs(save_dir, exist_ok=True)
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
 from datasets import load_dataset
-from transformers import AutoTokenizer
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
-from collections import Counter
-import torch.optim as optim
-from tqdm import tqdm
-import string
 from collections import Counter, defaultdict
-from train_mce import  SNLIDataset, prepare_snli_dataloaders
+import pandas as pd
+import numpy as np
+from scipy.stats import norm
+from tqdm import tqdm
+import matplotlib.pyplot as plt
+from train_mce import prepare_snli_dataloaders
+import string
 
-output_dir = "./model"
+OUTPUT_DIR = "./models"
+SAVE_DIR = "./models"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-model = AutoModelForSequenceClassification.from_pretrained(output_dir)
-tokenizer = AutoTokenizer.from_pretrained(output_dir)
+# Load model and tokenizer
+model = AutoModelForSequenceClassification.from_pretrained(OUTPUT_DIR)
+tokenizer = AutoTokenizer.from_pretrained(OUTPUT_DIR)
 
-dataset = load_dataset("snli")
+# Load datasets
+snli_dataset = load_dataset("snli")
+hans_dataset = load_dataset("hans", split="validation")
 
 def clean_text(text: str):
-    text = text.lower()
-    text = text.translate(str.maketrans("","", string.punctuation))
-    return text.split()
+    """
+    Clean and tokenize text by removing punctuation and converting to lowercase.
+    """
+    return text.lower().translate(str.maketrans("", "", string.punctuation)).split()
 
-def clean_snli(example):
-    example["premise"] = clean_text(example["premise"])
-    example["hypothesis"] = clean_text(example["hypothesis"])
-    example["combined"] = example["premise"] + example["hypothesis"]
-    return example
-
-dataset = dataset.map(clean_snli)
-
-label_map = {0: "entailment", 1: "neutral", 2: "contradiction"}
-
-def compute_metrics(pred):
-    predictions = pred.predictions.argmax(axis=-1)
-    labels = pred.label_ids
-    acc = accuracy_score(labels, predictions)
-    return {"accuracy": acc}
-
-training_args = TrainingArguments(
-    output_dir="./results",
-    evaluation_strategy="epoch",
-    learning_rate=5e-5,
-    per_device_train_batch_size=16,
-    per_device_eval_batch_size=16,
-    num_train_epochs=3,
-    weight_decay=0.01,
-    save_total_limit=2,
-    logging_dir="./logs",
-    logging_steps=500,
-)
-
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    eval_dataset=encoded_dataset['validation'],
-    compute_metrics=compute_metrics,
-)
-
-validation_results = trainer.evaluate()
-print(f"Validation accuracy: {validation_results['eval_accuracy']:.4f}")
-all_tokens = [token for example in dataset['train']['combined'] for token in example]
-
-word_counts = Counter(all_tokens)
-word_counts_df = pd.DataFrame(word_counts.items(), columns=["word", "count"])
-word_counts_df = word_counts_df.sort_values(by="count", ascending=False).reset_index(drop=True)
-print(word_counts_df.head())
-label_word_counts = {
-    "entailment": defaultdict(int),
-    "contradiction": defaultdict(int),
-    "neutral": defaultdict(int),
-}
-
-for example in dataset["train"]:
-    label = example["label"]
-    label_name = ["entailment", "neutral", "contradiction"][label]
-    for word in example["combined"]:
-        label_word_counts[label_name][word] += 1
-
-entailment_counts = pd.DataFrame(list(label_word_counts["entailment"].items()), columns=["word", "entailment_count"])
-contradiction_counts = pd.DataFrame(list(label_word_counts["contradiction"].items()), columns=["word", "contradiction_count"])
-neutral_counts = pd.DataFrame(list(label_word_counts["neutral"].items()), columns=["word", "neutral_count"])
-
-word_counts_df = word_counts_df.merge(entailment_counts, on="word", how="left").fillna(0)
-word_counts_df = word_counts_df.merge(contradiction_counts, on="word", how="left").fillna(0)
-word_counts_df = word_counts_df.merge(neutral_counts, on="word", how="left").fillna(0)
-
-word_counts_df[["entailment_count", "contradiction_count", "neutral_count"]] = word_counts_df[
-    ["entailment_count", "contradiction_count", "neutral_count"]
-].astype(int)
-
-word_counts_df = word_counts_df[word_counts_df['count'] >= 3].copy()
-alpha = 0.01/word_counts_df.shape[0]
-z_star = norm.ppf(1 - alpha)
-print(z_star)
-print(word_counts_df.shape[0])
-word_counts_df['alpha'] = 0.01
-word_counts_df['p_hat_entailment'] = word_counts_df['entailment_count']/word_counts_df['count']
-word_counts_df['p_hat_contradiction'] = word_counts_df['contradiction_count']/word_counts_df['count']
-word_counts_df['p_hat_neutral'] = word_counts_df['neutral_count']/word_counts_df['count']
-word_counts_df['z_stat_entailment'] = (word_counts_df['p_hat_entailment']-(1/3)) / np.sqrt(((1/3)*(1-(1/3)))/word_counts_df['count'])
-word_counts_df['z_stat_contradiction'] = (word_counts_df['p_hat_contradiction']-(1/3)) / np.sqrt(((1/3)*(1-(1/3)))/word_counts_df['count'])
-word_counts_df['z_stat_neutral'] = (word_counts_df['p_hat_neutral']-(1/3)) / np.sqrt(((1/3)*(1-(1/3)))/word_counts_df['count'])
-word_counts_df['critical_z'] = z_star
-word_counts_df.head()
-filtered_vocab = word_counts_df[word_counts_df['count'] >= 20]['word'].tolist()
-
-label_map = {0: "entailment", 1: "neutral", 2: "contradiction"}
-num_labels = len(label_map)
-
-results = []
-counter = 0
-for word in filtered_vocab:
-    if counter % 1000 == 0:
-        print(f"Processing word {counter}: {word}")
-    counter += 1
-    premise_input = tokenizer(
-        word, "", return_tensors="pt", truncation=True, padding="max_length", max_length=tokenizer.model_max_length
+def preprocess_dataset(dataset, tokenizer):
+    """
+    Preprocess the dataset: clean text and combine premise and hypothesis.
+    """
+    dataset = dataset.map(lambda example: {
+        "premise": clean_text(example["premise"]),
+        "hypothesis": clean_text(example["hypothesis"]),
+        "combined": clean_text(example["premise"]) + clean_text(example["hypothesis"])
+    })
+    dataset = dataset.map(
+        lambda example: tokenizer(example["premise"], example["hypothesis"], 
+                                  truncation=True, padding="max_length", max_length=tokenizer.model_max_length),
+        batched=True
     )
-    hypothesis_input = tokenizer(
-        "", word, return_tensors="pt", truncation=True, padding="max_length", max_length=tokenizer.model_max_length
-    )
-    
-    with torch.no_grad():
-        premise_output = model(**premise_input).logits.softmax(dim=-1)
-        hypothesis_output = model(**hypothesis_input).logits.softmax(dim=-1)
-    
-    avg_probabilities = (premise_output + hypothesis_output) / 2
+    dataset = dataset.rename_column("label", "labels")
+    dataset.set_format(type="torch", columns=["input_ids", "attention_mask", "labels"])
+    return dataset
 
-    for label_idx in range(num_labels):
-        results.append({
-            "word": word,
-            "label": label_map[label_idx],
-            "p(y|x_i)": avg_probabilities[0, label_idx].item()
+# Preprocess datasets
+snli_dataset = preprocess_dataset(snli_dataset, tokenizer)
+hans_dataset = preprocess_dataset(hans_dataset, tokenizer)
+
+def evaluate_dataset_accuracy(model, dataset, dataset_name):
+    """
+    Evaluate accuracy of the model on a given dataset.
+    """
+    training_args = TrainingArguments(
+        output_dir="./results",
+        evaluation_strategy="epoch",
+        learning_rate=5e-5,
+        per_device_train_batch_size=16,
+        num_train_epochs=3,
+        weight_decay=0.01,
+        logging_dir="./logs",
+    )
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        eval_dataset=dataset,
+        compute_metrics=lambda pred: {"accuracy": (pred.predictions.argmax(axis=-1) == pred.label_ids).mean()}
+    )
+    results = trainer.evaluate()
+    print(f"{dataset_name} Validation Accuracy: {results['eval_accuracy']:.4f}")
+    return results['eval_accuracy']
+
+def generate_table_1(dataset):
+    """
+    Generate Table 1: Word-level statistics for the dataset.
+    """
+    all_tokens = [token for example in dataset['train']['combined'] for token in example]
+    word_counts = Counter(all_tokens)
+
+    label_word_counts = {label: defaultdict(int) for label in ["entailment", "neutral", "contradiction"]}
+    for example in dataset["train"]:
+        label = ["entailment", "neutral", "contradiction"][example["labels"]]
+        for word in example["combined"]:
+            label_word_counts[label][word] += 1
+
+    word_counts_df = pd.DataFrame.from_dict(word_counts, orient="index", columns=["count"]).reset_index()
+    word_counts_df = word_counts_df.rename(columns={"index": "word"})
+
+    for label in label_word_counts.keys():
+        label_counts = pd.DataFrame.from_dict(label_word_counts[label], orient="index", columns=[f"{label}_count"]).reset_index()
+        word_counts_df = word_counts_df.merge(label_counts, on="word", how="left").fillna(0)
+
+    word_counts_df["critical_z"] = norm.ppf(1 - (0.01 / word_counts_df.shape[0]))
+    word_counts_df["p_hat_entailment"] = word_counts_df["entailment_count"] / word_counts_df["count"]
+    word_counts_df["p_hat_contradiction"] = word_counts_df["contradiction_count"] / word_counts_df["count"]
+    word_counts_df["p_hat_neutral"] = word_counts_df["neutral_count"] / word_counts_df["count"]
+
+    print(word_counts_df.head())
+    return word_counts_df
+
+def generate_table_2(model, tokenizer, dataset, top_words_by_class):
+    """
+    Generate Table 2: Evaluate model predictions on examples with top artifact words.
+    """
+    _, _, test_loader, _ = prepare_snli_dataloaders(batch_size=1)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+
+    results_by_class = []
+    for label, top_words in top_words_by_class.items():
+        total_correct, total_examples, total_miss = 0, 0, 0
+
+        for batch in tqdm(test_loader, desc=f"Processing {label} examples"):
+            electra_input = batch["electra_input"]
+            tokens = tokenizer.batch_decode(electra_input["input_ids"], skip_special_tokens=True)[0].split()
+
+            if not any(word in tokens for word in top_words):
+                continue
+
+            total_examples += 1
+            electra_input = {k: v.to(device) for k, v in electra_input.items()}
+
+            with torch.no_grad():
+                logits = model(**electra_input).logits
+                probabilities = F.softmax(logits, dim=-1)
+
+            predicted_label = probabilities.argmax(dim=-1).item()
+            true_label = batch["label"].item()
+            true_logit = probabilities[0, true_label].item()
+
+            total_correct += int(predicted_label == true_label)
+            total_miss += (1 - true_logit)
+
+        accuracy = total_correct / total_examples if total_examples > 0 else 0
+        avg_miss = total_miss / total_examples if total_examples > 0 else 0
+
+        results_by_class.append({
+            "Class": label,
+            "Accuracy": f"{accuracy:.2%}",
+            "Average Miss": f"{avg_miss:.4f}",
+            "Examples Analyzed": total_examples,
         })
 
-results_df = pd.DataFrame(results)
+    return pd.DataFrame(results_by_class)
 
-results_df = results_df.merge(
-    word_counts_df[['word', 'entailment_count', 'contradiction_count', 'neutral_count']],
-    on='word',
-    how='left'
-)
+if __name__ == "__main__":
+    # Accuracy on SNLI
+    print("Evaluating SNLI...")
+    evaluate_dataset_accuracy(model, snli_dataset["test"], "SNLI")
 
-def get_class_count(row):
-    if row['label'] == "entailment":
-        return row['entailment_count']
-    elif row['label'] == "contradiction":
-        return row['contradiction_count']
-    elif row['label'] == "neutral":
-        return row['neutral_count']
-    return 0
+    # Accuracy on HANS
+    print("Evaluating HANS...")
+    evaluate_dataset_accuracy(model, hans_dataset, "HANS")
 
-results_df['class_count'] = results_df.apply(get_class_count, axis=1)
+    # Table 1 results
+    word_counts_df = generate_table_1(snli_dataset)
 
-results_df['class_count'] = results_df['class_count'].fillna(1)
-
-results_df['z*'] = (results_df['p(y|x_i)'] - (1/3)) / np.sqrt((1/3) * (1 - (1/3)) / results_df['class_count'])
-
-z_star_df = results_df.pivot(index="word", columns="label", values="z*")
-strongest_classes = z_star_df.idxmax(axis=1)
-results_df['strongest_class'] = results_df['word'].map(strongest_classes)
-final_results = []
-
-for label in label_map.values():
-    class_words = results_df[results_df['strongest_class'] == label]
-    
-    high_group = class_words.nlargest(50, "z*")
-    low_group = class_words.nsmallest(50, "z*")
-    delta_p_y = (high_group['p(y|x_i)'].sum() - low_group['p(y|x_i)'].sum())
-    
-    final_results.append({
-        "Dataset": "SNLI",
-        "Class": label,
-        "Δp_y": f"{delta_p_y:.1f} %"
-    })
-
-delta_p_y_df = pd.DataFrame(final_results)
-
-print(delta_p_y_df)
-
-top_words_by_class = {}
-for label in label_map.values():
-    class_words = results_df[results_df['label'] == label]
-    top_words = class_words.nlargest(20, "z*")["word"].tolist()
-    top_words_by_class[label] = set(top_words)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-_, _, test_loader, bow_vocab = prepare_snli_dataloaders(batch_size=1)
-results_by_class = []
-
-for label, top_words in top_words_by_class.items():
-    total_correct = 0
-    total_examples = 0
-    total_miss = 0
-
-    for batch in tqdm(test_loader, desc=f"Processing {label} examples"):
-        electra_input = batch["electra_input"]
-        bow_input = batch["bow_input"]
-        label_id = batch["label"].item()
-
-        tokens = tokenizer.batch_decode(electra_input["input_ids"], skip_special_tokens=True)[0].split()
-
-        if not any(word in tokens for word in top_words):
-            continue
-
-        total_examples += 1
-
-        electra_input = {k: v.to(device) for k, v in electra_input.items()}
-        bow_input = bow_input.to(device)
-
-        with torch.no_grad():
-            ensemble_logits, _ = model(electra_input, bow_input)
-            probabilities = F.softmax(ensemble_logits, dim=-1)
-
-        predicted_label = torch.argmax(probabilities, dim=-1).item()
-        true_logit = probabilities[0, label_id].item()
-
-        total_correct += int(predicted_label == label_id)
-        total_miss += (1 - true_logit)
-
-    accuracy = total_correct / total_examples if total_examples > 0 else 0
-    avg_miss = total_miss / total_examples if total_examples > 0 else 0
-
-    results_by_class.append({
-        "Class": label,
-        "Accuracy": f"{accuracy:.2%}",
-        "Average Miss": f"{avg_miss:.4f}",
-        "Examples Analyzed": total_examples,
-    })
-
-final_table = pd.DataFrame(results_by_class)
-print(final_table)
+    # Table 2 results
+    top_words_by_class = {
+        "entailment": set(word_counts_df.nlargest(20, "p_hat_entailment")["word"]),
+        "neutral": set(word_counts_df.nlargest(20, "p_hat_neutral")["word"]),
+        "contradiction": set(word_counts_df.nlargest(20, "p_hat_contradiction")["word"]),
+    }
+    table_2_results = generate_table_2(model, tokenizer, snli_dataset, top_words_by_class)
+    print(table_2_results)

@@ -1,226 +1,169 @@
 import os
-save_dir = "./saved_models"
-os.makedirs(save_dir, exist_ok=True)
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-from transformers import AutoModelForSequenceClassification
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from datasets import load_dataset
-from transformers import AutoTokenizer
-from torch.utils.data import DataLoader, Dataset
-import numpy as np
-from collections import Counter, defaultdict
-import torch.optim as optim
 from tqdm import tqdm
-from train_mce import HighCapacityModel, MixedCapacityEnsemble, SNLIDataset, build_bow_vocab, prepare_snli_dataloaders, train_mixed_capacity_ensemble, evaluate_mixed_capacity_ensemble, train
+import pandas as pd
+import numpy as np
+from scipy.stats import norm
+from train_mce import MixedCapacityEnsemble, prepare_snli_dataloaders
+from collections import Counter, defaultdict
 
-checkpoint_path = "./mce_results/archivev2/mixed_capacity_ensemble_epoch_3.pt"
-optimizer_path = "./mce_results/archivev2/optimizer_epoch_3.pt"
+CHECKPOINT_PATH = "./models/mixed_capacity_ensemble_epoch_3.pt"
+OPTIMIZER_PATH = "./models/optimizer_epoch_3.pt"
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+LABEL_MAP = {0: "entailment", 1: "neutral", 2: "contradiction"}
 
-electra_model = AutoModelForSequenceClassification.from_pretrained(
-    "google/electra-small-discriminator", num_labels=3
-)
-vocab_size = 1028
-bow_model = nn.Sequential(
-    nn.Linear(vocab_size * 2, 300),
-    nn.ReLU(),
-    nn.Linear(300, 3)
-)
+def clean_text(text: str):
+    """
+    Clean and tokenize text by removing punctuation and converting to lowercase.
+    """
+    return text.lower().translate(str.maketrans("", "", string.punctuation)).split()
 
-model = MixedCapacityEnsemble(electra_model, bow_model, num_classes=3)
-model.load_state_dict(torch.load(checkpoint_path, map_location=torch.device('cpu')))
+def preprocess_dataset(dataset):
+    """
+    Preprocess the SNLI dataset: clean text and combine premise and hypothesis.
+    """
+    def clean_example(example):
+        example["premise"] = clean_text(example["premise"])
+        example["hypothesis"] = clean_text(example["hypothesis"])
+        example["combined"] = example["premise"] + example["hypothesis"]
+        return example
 
-optimizer = optim.Adam(model.parameters(), lr=5e-5)
-optimizer.load_state_dict(torch.load(optimizer_path, map_location=torch.device('cpu')))
+    return dataset.map(clean_example)
 
-dataset = load_dataset("snli")
-train_dataset = dataset["train"].filter(lambda example: example["label"] != -1)
+def compute_word_statistics(dataset):
+    """
+    Compute word-level statistics (count, label distribution, z-scores).
+    """
+    all_tokens = [token for example in dataset["train"]["combined"] for token in example]
+    word_counts = Counter(all_tokens)
 
-def build_bow_vocab(dataset, vocab_size=10000):
-    counter = Counter()
-    for example in dataset:
-        counter.update(example["premise"].lower().split())
-        counter.update(example["hypothesis"].lower().split())
-    most_common = counter.most_common(vocab_size)
-    return {word: idx for idx, (word, _) in enumerate(most_common)}
+    label_word_counts = defaultdict(lambda: defaultdict(int))
+    for example in dataset["train"]:
+        label = LABEL_MAP[example["label"]]
+        for word in example["combined"]:
+            label_word_counts[label][word] += 1
 
-bow_vocab = build_bow_vocab(train_dataset, vocab_size=1028)
+    # Merge counts into DataFrame
+    word_counts_df = pd.DataFrame.from_dict(word_counts, orient="index", columns=["count"]).reset_index()
+    word_counts_df.rename(columns={"index": "word"}, inplace=True)
 
-output_dir = "./model"
+    for label, counts in label_word_counts.items():
+        label_df = pd.DataFrame.from_dict(counts, orient="index", columns=[f"{label}_count"]).reset_index()
+        label_df.rename(columns={"index": "word"}, inplace=True)
+        word_counts_df = word_counts_df.merge(label_df, on="word", how="left").fillna(0)
 
-tokenizer = AutoTokenizer.from_pretrained(output_dir)
+    word_counts_df = word_counts_df[word_counts_df["count"] >= 3].copy()
+    word_counts_df["critical_z"] = norm.ppf(1 - (0.01 / word_counts_df.shape[0]))
+    return word_counts_df
 
-filtered_vocab = word_counts_df[word_counts_df['count'] >= 20]['word'].tolist()
+def compute_z_scores(word_counts_df):
+    """
+    Compute z-scores for word-label probabilities.
+    """
+    for label in LABEL_MAP.values():
+        p_hat = f"p_hat_{label}"
+        z_stat = f"z_stat_{label}"
+        label_count = f"{label}_count"
 
-label_map = {0: "entailment", 1: "neutral", 2: "contradiction"}
-num_labels = len(label_map)
+        word_counts_df[p_hat] = word_counts_df[label_count] / word_counts_df["count"]
+        word_counts_df[z_stat] = (word_counts_df[p_hat] - (1 / 3)) / (
+            ((1 / 3) * (1 - (1 / 3)) / word_counts_df["count"]) ** 0.5
+        )
+    return word_counts_df
 
-results = []
+def generate_table_4(word_counts_df, model, tokenizer, bow_vocab):
+    """
+    Generate results for Table 4: Compute z-scores using the MCE model.
+    """
+    results = []
+    model.to(DEVICE)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+    for word in tqdm(word_counts_df["word"], desc="Processing words for Table 4"):
+        electra_input = tokenizer(word, "", return_tensors="pt", truncation=True, padding="max_length", max_length=128)
+        electra_input = {k: v.to(DEVICE) for k, v in electra_input.items()}
 
-print("Starting z-score computation...")
-for counter, word in enumerate(tqdm(filtered_vocab, desc="Processing words")):
-    electra_input = tokenizer(word, "", return_tensors="pt", truncation=True, padding="max_length", max_length=128)
-    electra_input = {k: v.to(device) for k, v in electra_input.items()}
-
-    bow_input = torch.zeros(len(bow_vocab) * 2, dtype=torch.float32).to(device)
-    if word in bow_vocab:
-        bow_input[bow_vocab[word]] = 1.0
-
-    with torch.no_grad():
-        ensemble_logits, _ = model(electra_input, bow_input.unsqueeze(0))
-        probabilities = F.softmax(ensemble_logits, dim=-1).squeeze(0)
-
-    for label_idx in range(num_labels):
-        results.append({
-            "word": word,
-            "label": label_map[label_idx],
-            "p(y|x_i)": probabilities[label_idx].item()
-        })
-
-results_df = pd.DataFrame(results)
-
-results_df = results_df.merge(word_counts_df[['word', 'count']], on='word', how='left')
-
-results_df['z*'] = (results_df['p(y|x_i)'] - (1 / num_labels)) / (
-    ((1 / num_labels) * (1 - (1 / num_labels)) / results_df['count']) ** 0.5
-)
-
-
-z_star_df = results_df.pivot(index="word", columns="label", values="z*")
-strongest_classes = z_star_df.idxmax(axis=1)
-results_df['strongest_class'] = results_df['word'].map(strongest_classes)
-final_results = []
-
-for label in label_map.values():
-    class_words = results_df[results_df['strongest_class'] == label]
-
-    high_group = class_words.nlargest(20, "z*")
-    low_group = class_words.nsmallest(20, "z*")
-    
-    delta_p_y = (high_group['p(y|x_i)'].sum() - low_group['p(y|x_i)'].sum())
-
-    final_results.append({
-        "Dataset": "SNLI",
-        "Class": label,
-        "Δp_y": f"{delta_p_y:.1f} %"
-    })
-
-delta_p_y_df = pd.DataFrame(final_results)
-
-print(delta_p_y_df)
-
-top_words_by_class = {}
-for label in label_map.values():
-    class_words = results_df[results_df['label'] == label]
-    top_words = class_words.nlargest(20, "z*")["word"].tolist()
-    top_words_by_class[label] = set(top_words)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
-_, _, test_loader, bow_vocab = prepare_snli_dataloaders(batch_size=1)
-results_by_class = []
-
-for label, top_words in top_words_by_class.items():
-    total_correct = 0
-    total_examples = 0
-    total_miss = 0
-
-    for batch in tqdm(test_loader, desc=f"Processing {label} examples"):
-        electra_input = batch["electra_input"]
-        bow_input = batch["bow_input"]
-        label_id = batch["label"].item()
-
-        tokens = tokenizer.batch_decode(electra_input["input_ids"], skip_special_tokens=True)[0].split()
-
-        if not any(word in tokens for word in top_words):
-            continue
-
-        total_examples += 1
-
-        electra_input = {k: v.to(device) for k, v in electra_input.items()}
-        bow_input = bow_input.to(device)
+        bow_input = torch.zeros(len(bow_vocab) * 2, dtype=torch.float32).to(DEVICE)
+        if word in bow_vocab:
+            bow_input[bow_vocab[word]] = 1.0
 
         with torch.no_grad():
-            ensemble_logits, _ = model(electra_input, bow_input)
-            probabilities = F.softmax(ensemble_logits, dim=-1)
+            ensemble_logits, _ = model(electra_input, bow_input.unsqueeze(0))
+            probabilities = F.softmax(ensemble_logits, dim=-1).squeeze(0)
 
-        predicted_label = torch.argmax(probabilities, dim=-1).item()
-        true_logit = probabilities[0, label_id].item()
+        for label_idx, label in LABEL_MAP.items():
+            results.append({"word": word, "label": label, "p(y|x_i)": probabilities[label_idx].item()})
 
-        total_correct += int(predicted_label == label_id)
-        total_miss += (1 - true_logit)
+    results_df = pd.DataFrame(results)
+    results_df = results_df.merge(word_counts_df[["word", "count"]], on="word", how="left")
+    results_df["z*"] = (results_df["p(y|x_i)"] - (1 / len(LABEL_MAP))) / (
+        ((1 / len(LABEL_MAP)) * (1 - (1 / len(LABEL_MAP))) / results_df["count"]) ** 0.5
+    )
+    return results_df
 
-    accuracy = total_correct / total_examples if total_examples > 0 else 0
-    avg_miss = total_miss / total_examples if total_examples > 0 else 0
+def generate_table_5(results_df):
+    """
+    Generate results for Table 5: Compare z-scores for high and low groups.
+    """
+    final_results = []
+    for label in LABEL_MAP.values():
+        class_words = results_df[results_df["label"] == label]
+        high_group = class_words.nlargest(20, "z*")
+        low_group = class_words.nsmallest(20, "z*")
 
-    results_by_class.append({
-        "Class": label,
-        "Accuracy": f"{accuracy:.2%}",
-        "Average Miss": f"{avg_miss:.4f}",
-        "Examples Analyzed": total_examples,
-    })
+        delta_p_y = (high_group["p(y|x_i)"].sum() - low_group["p(y|x_i)"].sum())
+        final_results.append({"Dataset": "SNLI", "Class": label, "Δp_y": f"{delta_p_y:.1f} %"})
+    return pd.DataFrame(final_results)
 
-final_table = pd.DataFrame(results_by_class)
-print(final_table)
+def evaluate_on_datasets(model, datasets, criterion):
+    """
+    Evaluate the MCE model on SNLI and HANS datasets.
+    """
+    results = []
+    for name, loader in datasets.items():
+        total_loss, correct, total = 0, 0, 0
 
-datasets = {
-    "SNLI": snli_loader,
-    "HANS": hans_loader,
-    "HANSTRAIN": hans_train
-}
+        for batch in tqdm(loader, desc=f"Evaluating {name}"):
+            electra_input = {k: v.to(DEVICE) for k, v in batch["electra_input"].items()}
+            bow_input = batch["bow_input"].to(DEVICE)
+            labels = batch["label"].to(DEVICE)
 
-criterion = nn.CrossEntropyLoss()
+            with torch.no_grad():
+                ensemble_logits, _ = model(electra_input, bow_input)
+                loss = criterion(ensemble_logits, labels)
+                total_loss += loss.item()
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
+                preds = ensemble_logits.argmax(dim=-1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
 
-def prepare_dataloader(dataset_name, split, bow_vocab, electra_tokenizer, batch_size=32, max_seq_len=128):
-    dataset = load_dataset(dataset_name, split=split)
-    
-    if "label" in dataset.features and -1 in dataset["label"]:
-        dataset = dataset.filter(lambda example: example["label"] != -1)
-    
-    dataset = SNLIDataset(dataset, electra_tokenizer, bow_vocab, max_seq_len)
-    dataloader = DataLoader(dataset, batch_size=batch_size)
-    return dataloader
+        accuracy = correct / total if total > 0 else 0
+        results.append({"Dataset": name, "Loss": total_loss / len(loader), "Accuracy": accuracy})
+    return pd.DataFrame(results)
 
-electra_tokenizer = AutoTokenizer.from_pretrained("google/electra-small-discriminator")
+if __name__ == "__main__":
+    # Preprocess SNLI dataset
+    dataset = preprocess_dataset(load_dataset("snli"))
+    word_counts_df = compute_word_statistics(dataset)
+    word_counts_df = compute_z_scores(word_counts_df)
 
-snli_loader = prepare_dataloader("snli", "test", bow_vocab, electra_tokenizer)
-hans_loader = prepare_dataloader("hans", "validation", bow_vocab, electra_tokenizer)
-hans_train = prepare_dataloader("hans", "train", bow_vocab, electra_tokenizer)
+    # Load MCE model
+    electra_model = AutoModelForSequenceClassification.from_pretrained("google/electra-small-discriminator", num_labels=3)
+    bow_model = nn.Sequential(nn.Linear(1028 * 2, 300), nn.ReLU(), nn.Linear(300, 3))
+    model = MixedCapacityEnsemble(electra_model, bow_model, num_classes=3)
+    model.load_state_dict(torch.load(CHECKPOINT_PATH, map_location="cpu"))
 
-def evaluate_mixed_capacity_ensemble(model, dataloader, criterion, device="cpu"):
-    model.eval()
-    total_loss = 0
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Evaluating"):
-            electra_input = {k: v.to(device) for k, v in batch["electra_input"].items()}
-            bow_input = batch["bow_input"].to(device)
-            labels = batch["label"].to(device)
+    # Generate Tables
+    table_4_results = generate_table_4(word_counts_df, model, AutoTokenizer.from_pretrained("google/electra-small-discriminator"), bow_vocab={})
+    table_5_results = generate_table_5(table_4_results)
+    print(table_5_results)
 
-            ensemble_logits = model(electra_input, bow_input)
-
-            if isinstance(ensemble_logits, tuple):
-                ensemble_logits = ensemble_logits[0]
-
-            loss = criterion(ensemble_logits, labels)
-            total_loss += loss.item()
-
-            preds = torch.argmax(ensemble_logits, dim=-1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
-
-    return total_loss / len(dataloader), correct / total
-
-
-
-for name, loader in datasets.items():
-    loss, accuracy = evaluate_mixed_capacity_ensemble(model, loader, criterion, device=device)
-    print(f"{name} - Loss: {loss:.4f}, Accuracy: {accuracy:.4f}")
-
-
+    # Evaluate on SNLI and HANS
+    datasets = {
+        "SNLI": prepare_snli_dataloaders("snli", "test", batch_size=32)[2],
+        "HANS": prepare_snli_dataloaders("hans", "validation", batch_size=32)[2],
+    }
+    evaluation_results = evaluate_on_datasets(model, datasets, criterion=torch.nn.CrossEntropyLoss())
+    print(evaluation_results)
