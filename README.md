@@ -33,7 +33,6 @@ The project demonstrates how to:
 project_root/
 │
 ├── data/                   # Dataset files
-├── scrap/                  # Deprecated code. Mainly for archival purposes. 
 ├── src/                    # Source code
 │   ├── generate_artifact_statistics.py  # Generate artifact stats (e.g., Figure 1)
 │   ├── train_electra.py                  # Train ELECTRA-small model
